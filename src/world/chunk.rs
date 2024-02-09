@@ -40,6 +40,7 @@ impl Chunk {
     }
 
     pub fn build_mesh(&mut self, gfx: &GFXState) {
+        // Add mesh details
         for x in 0..Self::WIDTH {
             for z in 0..Self::DEPTH {
                 self.data[Voxel::idx_at(x, 8, z) as usize].empty = true;
@@ -48,6 +49,22 @@ impl Chunk {
             }
         }
 
+        for x in 1..Self::WIDTH - 1 {
+            for z in 1..Self::DEPTH - 1 {
+                self.data[Voxel::idx_at(x, 0, z) as usize].empty = true;
+                self.data[Voxel::idx_at(x, Self::HEIGHT - 1, z) as usize].empty = true;
+            }
+        }
+
+        for x in 7..9 {
+            for y in 0..Self::HEIGHT {
+                for z in 7..9 {
+                    self.data[Voxel::idx_at(x, y, z) as usize].empty = true;
+                }
+            }
+        }
+
+        // Build index buffer
         let mut indices: Vec<[[u32; 3]; 2]> = vec![];
 
         for x in 0..Self::DEPTH {
@@ -209,7 +226,7 @@ impl Chunk {
                         strip_index_format: None,
                         front_face: wgpu::FrontFace::Ccw,
                         cull_mode: Some(wgpu::Face::Back),
-                        polygon_mode: wgpu::PolygonMode::Fill,
+                        polygon_mode: wgpu::PolygonMode::Line,
                         unclipped_depth: false,
                         conservative: false,
                     },
