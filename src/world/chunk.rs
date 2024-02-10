@@ -1,6 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use glam::Vec3;
+use itertools::Itertools;
 use wgpu::util::DeviceExt;
 
 use crate::gfx::{GFXOperation, GFXState, Vertex};
@@ -24,6 +25,9 @@ impl Chunk {
     const U_HEIGHT: usize = 16;
     const U_DEPTH: usize = 16;
 
+    const EVENS_SIZE: u32 = Self::WIDTH * Self::HEIGHT;
+    const ODDS_SIZE: u32 = Self::WIDTH * (Self::HEIGHT + 1) + (Self::WIDTH + 1) * Self::HEIGHT;
+
     pub fn new(gfx: &GFXState) -> Self {
         Self {
             data: [Voxel::default(); Self::U_WIDTH * Self::U_HEIGHT * Self::U_DEPTH],
@@ -39,82 +43,114 @@ impl Chunk {
         }
     }
 
-    pub fn build_mesh(&mut self, gfx: &GFXState) {
-        for x in 0..Self::WIDTH {
-            for z in 0..Self::DEPTH {
-                self.data[Voxel::idx_at(x, 8, z) as usize].empty = true;
-                self.data[Voxel::idx_at(x, 9, z) as usize].empty = true;
-                self.data[Voxel::idx_at(x, 10, z) as usize].empty = true;
-            }
+    pub fn voxel(&self, x: u32, y: u32, z: u32) -> Option<&Voxel> {
+        let idx = x + y * Chunk::WIDTH + (z * Chunk::WIDTH * Chunk::HEIGHT);
+        if x >= Self::WIDTH || y >= Self::HEIGHT || z >= Self::DEPTH {
+            return None;
         }
 
-        let mut indices: Vec<[[u32; 3]; 2]> = vec![];
+        self.data.get(idx as usize)
+    }
 
-        for x in 0..Self::DEPTH {
+    pub fn voxel_mut(&mut self, x: u32, y: u32, z: u32) -> Option<&mut Voxel> {
+        let idx = x + y * Chunk::WIDTH + (z * Chunk::WIDTH * Chunk::HEIGHT);
+        if x >= Self::WIDTH || y >= Self::HEIGHT || z >= Self::DEPTH {
+            return None;
+        }
+
+        self.data.get_mut(idx as usize)
+    }
+
+    /// Calculates the total amount of vertices in this chunk.
+    pub fn vertex_count() -> u32 {
+        (Self::EVENS_SIZE * (Self::DEPTH + 1)) + (Self::ODDS_SIZE * Self::DEPTH)
+    }
+
+    pub fn vertex_at(x: u32, y: u32, z: u32, direction: Direction) -> u32 {
+        match direction {
+            Direction::TOP => {
+                (z + 1) * Self::EVENS_SIZE
+                    + z * Self::ODDS_SIZE
+                    + x
+                    + (y + 1) * Self::HEIGHT
+                    + (y + 1) * (Self::HEIGHT + 1)
+            }
+            Direction::BOTTOM => {
+                (z + 1) * Self::EVENS_SIZE
+                    + z * Self::ODDS_SIZE
+                    + x
+                    + y * Self::HEIGHT
+                    + y * (Self::HEIGHT + 1)
+            }
+            Direction::NORTH => (z * Self::EVENS_SIZE + z * Self::ODDS_SIZE + x + y * Self::HEIGHT),
+            Direction::SOUTH => {
+                (z + 1) * Self::EVENS_SIZE + (z + 1) * Self::ODDS_SIZE + x + y * Self::HEIGHT
+            }
+            Direction::EAST => {
+                (z + 1) * Self::EVENS_SIZE
+                    + z * Self::ODDS_SIZE
+                    + (x + 1)
+                    + (y + 1) * Self::HEIGHT
+                    + y * (Self::HEIGHT + 1)
+            }
+            Direction::WEST => {
+                (z + 1) * Self::EVENS_SIZE
+                    + z * Self::ODDS_SIZE
+                    + x
+                    + (y + 1) * Self::HEIGHT
+                    + y * (Self::HEIGHT + 1)
+            }
+        }
+    }
+
+    pub fn build_mesh(&mut self, gfx: &GFXState) {
+        let mut indices: Vec<[u32; 3]> = vec![];
+
+        for z in 0..1 {
             for y in 0..Self::HEIGHT {
-                for z in 0..Self::WIDTH {
-                    if self.data[Voxel::idx_at(x, y, z) as usize].empty {
+                for x in 0..Self::WIDTH {
+                    let voxel = self.voxel(x, y, z).unwrap();
+                    if voxel.empty {
                         continue;
                     }
 
-                    // Top face
-                    if y + 1 < Self::HEIGHT {
-                        let idx = Voxel::idx_at(x, y + 1, z) as usize;
-                        if self.data[idx].empty {
-                            indices.push(Voxel::get_face_indices(Face::TOP, x, y, z));
-                        }
-                    } else {
-                        indices.push(Voxel::get_face_indices(Face::TOP, x, y, z));
+                    indices.push([
+                        Self::vertex_at(x, y, z, Direction::EAST),
+                        Self::vertex_at(x, y, z, Direction::TOP),
+                        Self::vertex_at(x, y, z, Direction::WEST),
+                    ]);
+                    indices.push([
+                        Self::vertex_at(x, y, z, Direction::BOTTOM),
+                        Self::vertex_at(x, y, z, Direction::EAST),
+                        Self::vertex_at(x, y, z, Direction::WEST),
+                    ]);
+
+                    if !self.voxel(x + 1, y, z).map(|v| v.empty).unwrap_or(true) {
+                        indices.push([
+                            Self::vertex_at(x, y, z, Direction::EAST),
+                            Self::vertex_at(x, y, z, Direction::TOP),
+                            Self::vertex_at(x + 1, y, z, Direction::TOP),
+                        ]);
+                        indices.push([
+                            Self::vertex_at(x + 1, y, z, Direction::BOTTOM),
+                            Self::vertex_at(x, y, z, Direction::EAST),
+                            Self::vertex_at(x, y, z, Direction::BOTTOM),
+                        ]);
                     }
 
-                    // Bottom face
                     if y > 0 {
-                        let idx = Voxel::idx_at(x, y - 1, z) as usize;
-                        if self.data[idx].empty {
-                            indices.push(Voxel::get_face_indices(Face::BOTTOM, x, y, z));
+                        if !self.voxel(x, y - 1, z).map(|v| v.empty).unwrap_or(true) {
+                            indices.push([
+                                Self::vertex_at(x, y - 1, z, Direction::WEST),
+                                Self::vertex_at(x, y, z, Direction::BOTTOM),
+                                Self::vertex_at(x, y, z, Direction::WEST),
+                            ]);
+                            indices.push([
+                                Self::vertex_at(x, y - 1, z, Direction::EAST),
+                                Self::vertex_at(x, y, z, Direction::EAST),
+                                Self::vertex_at(x, y, z, Direction::BOTTOM),
+                            ]);
                         }
-                    } else {
-                        indices.push(Voxel::get_face_indices(Face::BOTTOM, x, y, z));
-                    }
-
-                    // Eastern face
-                    if x + 1 < Self::WIDTH {
-                        let idx = Voxel::idx_at(x + 1, y, z) as usize;
-                        if self.data[idx].empty {
-                            indices.push(Voxel::get_face_indices(Face::EAST, x, y, z));
-                        }
-                    } else {
-                        indices.push(Voxel::get_face_indices(Face::EAST, x, y, z));
-                    }
-
-                    // Western face
-                    if x > 0 {
-                        let idx = Voxel::idx_at(x - 1, y, z) as usize;
-                        if self.data[idx].empty {
-                            indices.push(Voxel::get_face_indices(Face::WEST, x, y, z));
-                        }
-                    } else {
-                        indices.push(Voxel::get_face_indices(Face::WEST, x, y, z));
-                    }
-
-                    // Northern face
-                    if z + 1 < Self::DEPTH {
-                        let idx = Voxel::idx_at(x, y, z + 1) as usize;
-                        if self.data[idx].empty {
-                            indices.push(Voxel::get_face_indices(Face::NORTH, x, y, z));
-                        }
-                    } else {
-                        indices.push(Voxel::get_face_indices(Face::NORTH, x, y, z));
-                    }
-
-                    // Southern face
-                    if z > 0 {
-                        let idx = Voxel::idx_at(x, y, z - 1) as usize;
-                        if self.data[idx].empty {
-                            indices.push(Voxel::get_face_indices(Face::SOUTH, x, y, z));
-                        }
-                    } else {
-                        indices.push(Voxel::get_face_indices(Face::SOUTH, x, y, z));
                     }
                 }
             }
@@ -129,7 +165,9 @@ impl Chunk {
         let vertex_buffer = VERTICES
             .get_or_init(|| Self::build_vertex_grid(gfx))
             .clone();
-        let pipeline = PIPELINE.get_or_init(|| Self::build_pipeline(gfx)).clone();
+        let pipeline = PIPELINE
+            .get_or_init(|| Self::build_pipeline(gfx, true))
+            .clone();
 
         if self.needs_rebuilding {
             self.build_mesh(gfx);
@@ -144,21 +182,73 @@ impl Chunk {
         })
     }
 
+    /// Build the `Chunk`'s vertex grid in a diamond pattern.
+    /// In this pattern, each voxel has one vertex at a distance of 0.5 units in any given direction.
     fn build_vertex_grid(gfx: &GFXState) -> Arc<wgpu::Buffer> {
-        let mut vertices: Vec<Vertex> = vec![];
+        // Horizontal (X axis) lines
+        let evens_line = || (0..Self::WIDTH).into_iter().map(|x| x as f32).collect_vec();
+        let odds_line = || {
+            (0..Self::WIDTH + 1)
+                .into_iter()
+                .map(|x| x as f32 - 0.5)
+                .collect_vec()
+        };
 
-        for z in 0..Self::DEPTH + 1 {
-            for y in 0..Self::HEIGHT + 1 {
-                for x in 0..Self::WIDTH + 1 {
-                    vertices.push(Vertex::new(Vec3::new(
-                        -0.5 + 1.0 * x as f32,
-                        -0.5 + 1.0 * y as f32,
-                        -0.5 + 1.0 * z as f32,
-                    )));
-                }
-            }
-        }
+        // Vertical stacks
+        let evens_stack = std::iter::once_with(|| {
+            (0..Self::HEIGHT)
+                .into_iter()
+                .map(|y| {
+                    (
+                        (0..Self::WIDTH).into_iter().map(|x| x as f32).collect_vec(),
+                        y as f32,
+                    )
+                })
+                .collect_vec()
+        });
+        let odds_stack = std::iter::once_with(|| {
+            (0..Self::HEIGHT * 2 + 1)
+                .into_iter()
+                .map(|y| {
+                    (
+                        if y % 2 == 0 {
+                            evens_line()
+                        } else {
+                            odds_line()
+                        },
+                        y as f32 * 0.5 - 0.5,
+                    )
+                })
+                .collect_vec()
+        });
+        let mut stacks = evens_stack.interleave(odds_stack).cycle();
 
+        let depth = (0..Self::DEPTH * 2 + 1)
+            .into_iter()
+            .map(|z| z as f32 * 0.5 - 0.5);
+
+        let vertices = depth
+            .clone()
+            .map(|z| {
+                stacks
+                    .next()
+                    .map(|stack: Vec<(Vec<f32>, f32)>| {
+                        stack
+                            .into_iter()
+                            .map(|(line, y)| {
+                                line.into_iter()
+                                    .map(move |x| Vertex::new(Vec3::new(x, y, z)))
+                                    .collect_vec()
+                            })
+                            .flatten()
+                            .collect_vec()
+                    })
+                    .unwrap()
+            })
+            .flatten()
+            .collect_vec();
+
+        // Create vertex buffer
         Arc::new(
             gfx.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -169,7 +259,7 @@ impl Chunk {
         )
     }
 
-    fn build_pipeline(gfx: &GFXState) -> Arc<wgpu::RenderPipeline> {
+    fn build_pipeline(gfx: &GFXState, wireframe: bool) -> Arc<wgpu::RenderPipeline> {
         let shader = gfx
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -208,8 +298,12 @@ impl Chunk {
                         topology: wgpu::PrimitiveTopology::TriangleList,
                         strip_index_format: None,
                         front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: Some(wgpu::Face::Back),
-                        polygon_mode: wgpu::PolygonMode::Fill,
+                        cull_mode: None, //Some(wgpu::Face::Back),
+                        polygon_mode: if wireframe {
+                            wgpu::PolygonMode::Line
+                        } else {
+                            wgpu::PolygonMode::Fill
+                        },
                         unclipped_depth: false,
                         conservative: false,
                     },
@@ -249,93 +343,6 @@ pub struct Voxel {
     pub empty: bool,
 }
 
-impl Voxel {
-    pub const fn idx_at(x: u32, y: u32, z: u32) -> u32 {
-        x + y * Chunk::WIDTH + (z * Chunk::WIDTH * Chunk::HEIGHT)
-    }
-
-    pub const fn vertex_idx_at(x: u32, y: u32, z: u32) -> u32 {
-        x + y * (Chunk::WIDTH + 1) + (z * (Chunk::WIDTH + 1) * (Chunk::HEIGHT + 1))
-    }
-
-    pub fn get_face_indices(face: Face, x: u32, y: u32, z: u32) -> [[u32; 3]; 2] {
-        match face {
-            Face::TOP => [
-                [
-                    Voxel::vertex_idx_at(x + 1, y + 1, z),
-                    Voxel::vertex_idx_at(x + 1, y + 1, z + 1),
-                    Voxel::vertex_idx_at(x, y + 1, z + 1),
-                ],
-                [
-                    Voxel::vertex_idx_at(x, y + 1, z),
-                    Voxel::vertex_idx_at(x + 1, y + 1, z),
-                    Voxel::vertex_idx_at(x, y + 1, z + 1),
-                ],
-            ],
-            Face::BOTTOM => [
-                [
-                    Voxel::vertex_idx_at(x + 1, y, z + 1),
-                    Voxel::vertex_idx_at(x + 1, y, z),
-                    Voxel::vertex_idx_at(x, y, z),
-                ],
-                [
-                    Voxel::vertex_idx_at(x, y, z + 1),
-                    Voxel::vertex_idx_at(x + 1, y, z + 1),
-                    Voxel::vertex_idx_at(x, y, z),
-                ],
-            ],
-            Face::EAST => [
-                [
-                    Voxel::vertex_idx_at(x + 1, y, z + 1),
-                    Voxel::vertex_idx_at(x + 1, y + 1, z + 1),
-                    Voxel::vertex_idx_at(x + 1, y + 1, z),
-                ],
-                [
-                    Voxel::vertex_idx_at(x + 1, y, z + 1),
-                    Voxel::vertex_idx_at(x + 1, y + 1, z),
-                    Voxel::vertex_idx_at(x + 1, y, z),
-                ],
-            ],
-            Face::WEST => [
-                [
-                    Voxel::vertex_idx_at(x, y, z),
-                    Voxel::vertex_idx_at(x, y + 1, z),
-                    Voxel::vertex_idx_at(x, y + 1, z + 1),
-                ],
-                [
-                    Voxel::vertex_idx_at(x, y, z + 1),
-                    Voxel::vertex_idx_at(x, y, z),
-                    Voxel::vertex_idx_at(x, y + 1, z + 1),
-                ],
-            ],
-            Face::NORTH => [
-                [
-                    Voxel::vertex_idx_at(x, y, z + 1),
-                    Voxel::vertex_idx_at(x, y + 1, z + 1),
-                    Voxel::vertex_idx_at(x + 1, y + 1, z + 1),
-                ],
-                [
-                    Voxel::vertex_idx_at(x + 1, y, z + 1),
-                    Voxel::vertex_idx_at(x, y, z + 1),
-                    Voxel::vertex_idx_at(x + 1, y + 1, z + 1),
-                ],
-            ],
-            Face::SOUTH => [
-                [
-                    Voxel::vertex_idx_at(x + 1, y, z),
-                    Voxel::vertex_idx_at(x + 1, y + 1, z),
-                    Voxel::vertex_idx_at(x, y + 1, z),
-                ],
-                [
-                    Voxel::vertex_idx_at(x, y, z),
-                    Voxel::vertex_idx_at(x + 1, y, z),
-                    Voxel::vertex_idx_at(x, y + 1, z),
-                ],
-            ],
-        }
-    }
-}
-
 impl Default for Voxel {
     fn default() -> Self {
         Self {
@@ -346,11 +353,17 @@ impl Default for Voxel {
 }
 
 #[derive(Clone, Copy)]
-pub enum Face {
+pub enum Direction {
+    /// Positive Y axis (+Y).
     TOP,
+    /// Negative Y axis (-Y).
     BOTTOM,
+    /// Negative X axis (-X).
     EAST,
+    /// Positive X axis (+X).
     WEST,
+    /// Negative Z axis (-Z).
     NORTH,
+    /// Positive Z axis (+Z).
     SOUTH,
 }

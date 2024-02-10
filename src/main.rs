@@ -32,7 +32,7 @@ fn main() -> Result<()> {
                 WindowEvent::RedrawRequested => {
                     let delta = 1.0 / 240.0;
                     time += delta / 2.0;
-                    cam_angle += 60.0 * delta;
+                    cam_angle += 15.0 * delta;
                     let cam_angle_rad: f32 = cam_angle.to_radians();
 
                     let cam_pos = Vec2::new(cam_angle_rad.cos(), cam_angle_rad.sin())
